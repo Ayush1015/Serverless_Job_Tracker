@@ -1,4 +1,3 @@
-1. Browser: authenticated `POST /upload-url` with `{ filename, contentType }`.
 # Learning Guide: Serverless Job Application Tracker
 
 Read this top to bottom once, then keep it next to you while you explore

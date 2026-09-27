@@ -4,6 +4,10 @@ A full-stack app to track your job applications: company, role, status
 (wishlist / applied / interview / offer / rejected), notes, and resume
 uploads. Built to learn the AWS serverless stack end to end.
 
+## Screenshots
+
+Coming soon - dashboard and applications views, added once the frontend is deployed.
+
 ## Architecture
 
 ```mermaid
