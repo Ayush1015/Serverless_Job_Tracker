@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless job application tracker (API Gateway + Lambda + DynamoDB + S3)
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ApplicationsTable
+        RESUME_BUCKET: !Ref ResumeBucket
+        APPLICATIONS_INDEX: UserIdCreatedAtIndex
+
+Resources:
+  # HTTP API is the modern, cheaper API Gateway flavor. CORS is declared here
+  # so preflight OPTIONS requests are answered by API Gateway, not Lambda.
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              audience:
+                - !Ref UserPoolClient
+              issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+      CorsConfiguration:
+        AllowOrigins: ['*'] # restrict to your frontend domain in production
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [Content-Type, Authorization]
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-users'
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub '${AWS::StackName}-web'
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  ApplicationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdCreatedAtIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # Private bucket; objects are uploaded via presigned URLs only.
+  ResumeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ['*'] # restrict to your frontend domain in production
+            AllowedMethods: [PUT]
+            AllowedHeaders: ['*']
+
+  CreateApplicationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/createApplication.ts']
+    Properties:
+      Events:
+        Create:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /applications, Method: POST }
+      Handler: createApplication.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ApplicationsTable }
+
+  ListApplicationsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/listApplications.ts']
+    Properties:
+      Events:
+        List:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /applications, Method: GET }
+      Handler: listApplications.handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${ApplicationsTable.Arn}/index/UserIdCreatedAtIndex'
+
+  GetApplicationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/getApplication.ts']
+    Properties:
+      Events:
+        Get:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: '/applications/{id}', Method: GET }
+      Handler: getApplication.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ApplicationsTable }
+
+  UpdateApplicationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/updateApplication.ts']
+    Properties:
+      Events:
+        Update:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: '/applications/{id}', Method: PUT }
+      Handler: updateApplication.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ApplicationsTable }
+
+  DeleteApplicationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/deleteApplication.ts']
+    Properties:
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: '/applications/{id}', Method: DELETE }
+      Handler: deleteApplication.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ApplicationsTable }
+
+  GetUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints: ['src/handlers/getUploadUrl.ts']
+    Properties:
+      Events:
+        GetUploadUrl:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /upload-url, Method: POST }
+      Handler: getUploadUrl.handler
+      Policies:
+        - S3WritePolicy: { BucketName: !Ref ResumeBucket }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  ResumeBucketName:
+    Description: S3 bucket for resume uploads
+    Value: !Ref ResumeBucket
+  UserPoolId:
+    Description: Cognito user pool for email sign-up and sign-in
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Public Cognito app client for the web frontend
+    Value: !Ref UserPoolClient
